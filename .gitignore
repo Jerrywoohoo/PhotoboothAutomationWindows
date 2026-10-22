@@ -1,0 +1,21 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# macOS metadata & AppleDouble resource forks
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Test output directories & spool files
+interactive_test_photos/
+test_scratch/
+.spool_lossless_*.png
+

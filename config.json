@@ -1,0 +1,7 @@
+{
+  "watch_folder": "~/Pictures",
+  "dry_run": false,
+  "default_copies": 1,
+  "mode": "gui"
+}
+

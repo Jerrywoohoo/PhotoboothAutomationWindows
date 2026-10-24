@@ -146,7 +146,7 @@ class RoundedButton(tk.Label):
         self.auto_fit = auto_fit
 
         self._tk_font = tkfont.Font(family=SYSTEM_FONT, size=self.font_size, weight="bold")
-        measured_w = self._tk_font.measure(self._text)
+        measured_w = self._measure_text_width(self._text)
         if width is None or self.auto_fit:
             target_w = measured_w + self.pad_x * 2
             self.width = max(self.min_width, target_w)
@@ -230,12 +230,17 @@ class RoundedButton(tk.Label):
         if self._enabled:
             self.configure(image=self.normal_photo, fg=self.fg_hex)
 
+    def _measure_text_width(self, text_str):
+        base_w = self._tk_font.measure(text_str)
+        extra_emoji_px = sum(8 for ch in text_str if ord(ch) > 0x2000 and ord(ch) != 0xFE0F)
+        return base_w + extra_emoji_px
+
     def set_text(self, new_text, resize_if_needed=False):
         self._text = new_text
         if resize_if_needed:
-            measured_w = self._tk_font.measure(self._text)
+            measured_w = self._measure_text_width(self._text)
             new_w = max(self.min_width, measured_w + self.pad_x * 2)
-            if abs(new_w - self.width) > 4:
+            if abs(new_w - self.width) > 1:
                 self.width = new_w
                 self._rebuild_surfaces()
         self.configure(text=new_text, image=self.normal_photo if self._enabled else self.disabled_photo)
@@ -288,7 +293,8 @@ class PhotoCard(tk.Frame):
     - '🔍 Preview' button (and double-click on image) opens Google Drive-style full-window Lightbox.
     """
     def __init__(self, parent, photo_path, shot_index, on_toggle_select, on_print_single, on_open_preview,
-                 canvas_height=315, get_frame=None, **kwargs):
+                 canvas_height=315, get_frame=None, frame_index=0, get_frame_templates=None,
+                 on_frame_change=None, **kwargs):
         super().__init__(
             parent, bg=PALETTE["card_selected_bg"], highlightthickness=3,
             highlightbackground=PALETTE["accent_blue"], bd=0, **kwargs
@@ -300,6 +306,9 @@ class PhotoCard(tk.Frame):
         self.on_open_preview = on_open_preview
         self.canvas_height = canvas_height
         self.get_frame = get_frame or (lambda: None)
+        self.frame_index = frame_index
+        self.get_frame_templates = get_frame_templates or (lambda: [])
+        self.on_frame_change = on_frame_change
         self.use_frame = True
 
         self.selected = True
@@ -354,33 +363,57 @@ class PhotoCard(tk.Frame):
         self.canvas.bind("<Double-Button-1>", self._on_canvas_double_click)
         self.canvas.bind("<Configure>", lambda e: self._render_thumbnail())
 
-        # 3. Photo Tools Row (Preview Lightbox + Frame Overlay Toggle + Rotate)
+        # 3. Photo Tools Row (Preview Lightbox + Rotate)
         self.tools_frame = tk.Frame(self, bg=PALETTE["card_selected_bg"])
-        self.tools_frame.pack(fill=tk.X, padx=12, pady=(6, 4))
+        self.tools_frame.pack(fill=tk.X, padx=12, pady=(6, 2))
 
         self.btn_preview = RoundedButton(
             self.tools_frame, text="🔍 Preview", command=lambda: self.on_open_preview(self),
-            height=32, radius=10, pad_x=8, font_size=12,
+            height=32, radius=10, pad_x=10, font_size=12,
             bg_hex=PALETTE["accent_purple"], hover_hex=PALETTE["accent_purple_hover"],
             active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["card_selected_bg"]
         )
-        self.btn_preview.pack(side=tk.LEFT, padx=(0, 4))
-
-        self.btn_frame_toggle = RoundedButton(
-            self.tools_frame, text="🖼️ Frame: ON", command=self.toggle_frame,
-            height=32, radius=10, pad_x=8, font_size=12,
-            bg_hex=PALETTE["accent_purple"], hover_hex=PALETTE["accent_purple_hover"],
-            active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["card_selected_bg"]
-        )
-        self.btn_frame_toggle.pack(side=tk.LEFT, padx=4)
+        self.btn_preview.pack(side=tk.LEFT)
 
         self.btn_rot = RoundedButton(
             self.tools_frame, text="🔄 Rotate", command=self.rotate_photo,
-            height=32, radius=10, pad_x=8, font_size=12,
+            height=32, radius=10, pad_x=10, font_size=12,
             bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
             active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["card_selected_bg"]
         )
         self.btn_rot.pack(side=tk.RIGHT)
+
+        # 3b. Individual Photo Frame Stepper Row ([ ◀ ] [ 🖼️ Full Template Name ] [ ▶ ])
+        self.frame_row = tk.Frame(self, bg=PALETTE["card_selected_bg"])
+        self.frame_row.pack(fill=tk.X, padx=12, pady=(2, 4))
+
+        self.frame_stepper = tk.Frame(self.frame_row, bg=PALETTE["card_selected_bg"])
+        self.frame_stepper.pack(anchor=tk.CENTER)
+
+        self.btn_frame_prev = RoundedButton(
+            self.frame_stepper, text="◀", command=self.prev_template,
+            height=32, radius=10, pad_x=8, min_width=30, font_size=12,
+            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["card_selected_bg"]
+        )
+        self.btn_frame_prev.pack(side=tk.LEFT, padx=(0, 4))
+
+        self.btn_frame_toggle = RoundedButton(
+            self.frame_stepper, text="🖼️ Frame", command=self.on_frame_click,
+            height=32, radius=10, pad_x=14, font_size=12,
+            bg_hex=PALETTE["accent_purple"], hover_hex=PALETTE["accent_purple_hover"],
+            active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["card_selected_bg"]
+        )
+        self.btn_frame_toggle.pack(side=tk.LEFT, padx=2)
+
+        self.btn_frame_next = RoundedButton(
+            self.frame_stepper, text="▶", command=self.next_template,
+            height=32, radius=10, pad_x=8, min_width=30, font_size=12,
+            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["card_selected_bg"]
+        )
+        self.btn_frame_next.pack(side=tk.LEFT, padx=(4, 0))
+        self._update_frame_visual()
 
         # 4. Print & Quantity Controls Row (Copies Stepper on Left + Direct Print on Right)
         self.controls = tk.Frame(self, bg=PALETTE["card_selected_bg"])
@@ -484,10 +517,14 @@ class PhotoCard(tk.Frame):
             img = img.rotate(-self.rotation, expand=True)
 
         # Show exactly what will print: overlay the frame when one is chosen and enabled for this photo
-        frame = self.get_frame() if self.use_frame else None
+        try:
+            frame = self.get_frame(self) if self.use_frame else None
+        except TypeError:
+            frame = self.get_frame() if self.use_frame else None
         if frame is not None:
             composed_key = (self.rotation % 360, id(frame))
-            if getattr(self, "_composed", (None,))[0] != composed_key:
+            cur_comp = getattr(self, "_composed", None)
+            if cur_comp is None or cur_comp[0] != composed_key:
                 self._composed = (composed_key, printer_service.compose_with_frame(img, frame))
             img = self._composed[1]
 
@@ -514,20 +551,127 @@ class PhotoCard(tk.Frame):
         self.rotation = (self.rotation + 90) % 360
         self._render_thumbnail()
 
-    def toggle_frame(self):
-        self.use_frame = not self.use_frame
-        if self.use_frame:
-            self.btn_frame_toggle.set_colors(
-                PALETTE["accent_purple"], PALETTE["accent_purple_hover"], PALETTE["accent_purple_active"]
-            )
-            self.btn_frame_toggle.set_text("🖼️ Frame: ON", resize_if_needed=True)
-        else:
+    def _update_frame_visual(self):
+        templates = self.get_frame_templates()
+        total = len(templates)
+        if not self.use_frame or total == 0:
             self.btn_frame_toggle.set_colors(
                 PALETTE["accent_charcoal"], PALETTE["accent_charcoal_hover"], PALETTE["accent_charcoal_active"],
                 fg_hex=PALETTE["text_secondary"]
             )
             self.btn_frame_toggle.set_text("🖼️ Frame: OFF", resize_if_needed=True)
+        else:
+            if not (0 <= self.frame_index < total):
+                self.frame_index = 0
+            path = templates[self.frame_index]
+            raw_name = os.path.splitext(os.path.basename(path))[0]
+            clean_name = raw_name
+            if len(clean_name) > 3 and clean_name[:2].isdigit() and clean_name[2] in ("_", "-", " "):
+                clean_name = clean_name[3:]
+            clean_name = clean_name.replace("_", " ")
+
+            text = f"🖼️ {clean_name}"
+            self.btn_frame_toggle.set_colors(
+                PALETTE["accent_purple"], PALETTE["accent_purple_hover"], PALETTE["accent_purple_active"]
+            )
+            self.btn_frame_toggle.set_text(text, resize_if_needed=True)
+
+        can_cycle = total > 1
+        if hasattr(self, "btn_frame_prev"):
+            self.btn_frame_prev.set_enabled(can_cycle)
+        if hasattr(self, "btn_frame_next"):
+            self.btn_frame_next.set_enabled(can_cycle)
+
+    def on_frame_click(self):
+        """Opens dropdown menu to choose template directly or toggle off."""
+        templates = self.get_frame_templates()
+        if not templates:
+            self.toggle_frame()
+            return
+
+        menu = tk.Menu(
+            self, tearoff=0,
+            bg=PALETTE["surface_elevated"], fg="#ffffff",
+            activebackground=PALETTE["accent_purple"], activeforeground="#ffffff",
+            font=font_bold(12)
+        )
+        menu.add_command(label=f"── Frame for Shot #{self.shot_index} ──", state=tk.DISABLED)
+        for idx, path in enumerate(templates):
+            name = os.path.splitext(os.path.basename(path))[0].replace("_", " ")
+            marker = "✓  " if (self.use_frame and idx == self.frame_index) else "    "
+            menu.add_command(
+                label=f"{marker}{idx + 1}. {name}",
+                command=lambda i=idx: self.set_template(i)
+            )
+        menu.add_separator()
+        if self.use_frame:
+            menu.add_command(label="🚫 Turn Frame OFF", command=self.toggle_frame)
+        else:
+            menu.add_command(label="🖼️ Turn Frame ON", command=self.toggle_frame)
+        if len(templates) > 1:
+            menu.add_command(label="◀ Previous Template", command=self.prev_template)
+            menu.add_command(label="▶ Next Template", command=self.next_template)
+
+        x = self.btn_frame_toggle.winfo_rootx()
+        y = self.btn_frame_toggle.winfo_rooty() + self.btn_frame_toggle.winfo_height() + 2
+        menu.post(x, y)
+
+    def next_template(self):
+        """Cycles circularly to the next template for this photo."""
+        templates = self.get_frame_templates()
+        if not templates:
+            return
+        if not self.use_frame:
+            self.use_frame = True
+            self.frame_index = 0
+        else:
+            self.frame_index = (self.frame_index + 1) % len(templates)
+        self._composed = None
+        self._thumb_cache.clear()
+        self._update_frame_visual()
         self._render_thumbnail()
+        if self.on_frame_change:
+            self.on_frame_change(self)
+
+    def prev_template(self):
+        """Cycles circularly to the previous template for this photo."""
+        templates = self.get_frame_templates()
+        if not templates:
+            return
+        if not self.use_frame:
+            self.use_frame = True
+            self.frame_index = len(templates) - 1
+        else:
+            self.frame_index = (self.frame_index - 1) % len(templates)
+        self._composed = None
+        self._thumb_cache.clear()
+        self._update_frame_visual()
+        self._render_thumbnail()
+        if self.on_frame_change:
+            self.on_frame_change(self)
+
+    def set_template(self, i):
+        """Selects a specific template for this photo."""
+        templates = self.get_frame_templates()
+        if 0 <= i < len(templates):
+            self.use_frame = True
+            self.frame_index = i
+            self._composed = None
+            self._thumb_cache.clear()
+            self._update_frame_visual()
+            self._render_thumbnail()
+            if self.on_frame_change:
+                self.on_frame_change(self)
+
+    def toggle_frame(self):
+        """Toggles frame ON / OFF for this photo."""
+        self.use_frame = not self.use_frame
+        self._composed = None
+        self._thumb_cache.clear()
+        self._update_frame_visual()
+        self._render_thumbnail()
+        if self.on_frame_change:
+            self.on_frame_change(self)
 
     def _sync_copy_labels(self):
         unit = "Copy" if self.copies == 1 else "Copies"
@@ -561,8 +705,10 @@ class PhotoCard(tk.Frame):
         self.header.configure(bg=card_bg)
         self.lbl_name.configure(bg=card_bg)
         self.tools_frame.configure(bg=card_bg)
+        self.frame_row.configure(bg=card_bg)
+        self.frame_stepper.configure(bg=card_bg)
         self.controls.configure(bg=card_bg)
-        for btn in (self.btn_preview, self.btn_frame_toggle, self.btn_rot, self.btn_print_this):
+        for btn in (self.btn_preview, self.btn_frame_prev, self.btn_frame_toggle, self.btn_frame_next, self.btn_rot, self.btn_print_this):
             btn.container_bg = card_bg
             btn._rebuild_surfaces()
 
@@ -577,7 +723,9 @@ class PhotoCard(tk.Frame):
             self.lbl_select_badge.configure(text="✕ SKIPPED", bg=PALETTE["accent_charcoal"], fg=PALETTE["text_secondary"])
             self.btn_print_this.set_enabled(False)
         self.btn_preview.configure(image=self.btn_preview.normal_photo)
+        self.btn_frame_prev.set_enabled(self.btn_frame_prev._enabled)
         self.btn_frame_toggle.configure(image=self.btn_frame_toggle.normal_photo)
+        self.btn_frame_next.set_enabled(self.btn_frame_next._enabled)
         self.btn_rot.configure(image=self.btn_rot.normal_photo)
 
 
@@ -607,15 +755,20 @@ class PhotoBoothApp:
         self._drag_start = None
         self.lightbox_tk_img = None
 
-        # Photo frame overlay (transparent PNG), chosen via the top bar
+        # Multi-template photo frame system
+        self.frame_templates = []
+        self.frame_index = -1
         self.frame_path = None
         self.frame_img = None
+        self.frames_folder = None
+        self._frame_cache = {}
 
         self._build_top_bar()
         self._build_bottom_bar()
         self._build_gallery_area()
         self._build_lightbox_overlay()
         self._bind_shortcuts()
+        self._init_frame_templates()
 
         # Initialize Folder Watcher
         self.watcher = FolderWatcher(self.watch_folder, self.on_new_photo_detected)
@@ -668,14 +821,35 @@ class PhotoBoothApp:
         )
         self.lbl_folder.pack(side=tk.LEFT, padx=(4, 12))
 
-        # Photo frame picker (transparent PNG overlaid on prints)
-        self.btn_frame = RoundedButton(
-            top_bar, text="🖼️ Frame: None", command=self.select_frame,
-            height=40, radius=11, pad_x=14, font_size=15,
-            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
-            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_bg"]
+        # Multi-Template Frame Stepper: [ ◀ ] [ 🖼️ Template (1/3) ] [ ▶ ]
+        self.frame_box = tk.Frame(
+            top_bar, bg=PALETTE["surface_elevated"],
+            highlightthickness=1, highlightbackground=PALETTE["surface_border"]
         )
-        self.btn_frame.pack(side=tk.LEFT, padx=(0, 12))
+        self.frame_box.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_frame_prev = RoundedButton(
+            self.frame_box, text="◀", command=self.prev_frame_template,
+            height=36, radius=9, pad_x=8, min_width=30, font_size=13,
+            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_elevated"]
+        )
+
+        self.btn_frame_active = RoundedButton(
+            self.frame_box, text="🖼️ Frame: None", command=self._on_frame_button_clicked,
+            height=36, radius=9, pad_x=12, font_size=13,
+            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_elevated"]
+        )
+        self.btn_frame_active.pack(side=tk.LEFT, padx=2, pady=2)
+        self.btn_frame = self.btn_frame_active
+
+        self.btn_frame_next = RoundedButton(
+            self.frame_box, text="▶", command=self.next_frame_template,
+            height=36, radius=9, pad_x=8, min_width=30, font_size=13,
+            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_elevated"]
+        )
 
         # Center-Left: Grid Zoom Stepper ([ − ] 🔍 100% (3/row) [ + ])
         zoom_frame = tk.Frame(
@@ -725,13 +899,14 @@ class PhotoBoothApp:
         )
         btn_queue.pack(side=tk.RIGHT, padx=4)
 
-        btn_sim = RoundedButton(
+        self.btn_sim = RoundedButton(
             top_bar, text="📸 +3 Shots", command=self.simulate_batch,
             height=40, radius=11, pad_x=14, font_size=15,
             bg_hex=PALETTE["accent_purple"], hover_hex=PALETTE["accent_purple_hover"],
             active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["surface_bg"]
         )
-        btn_sim.pack(side=tk.RIGHT, padx=4)
+        if self.dry_run.get():
+            self.btn_sim.pack(side=tk.RIGHT, padx=4)
 
         self.btn_mode_toggle = RoundedButton(
             top_bar, text="🧪 Test Mode: ON", command=self.toggle_dry_run,
@@ -758,11 +933,19 @@ class PhotoBoothApp:
                 PALETTE["accent_amber"], PALETTE["accent_amber_hover"], PALETTE["accent_amber_active"]
             )
             self.btn_mode_toggle.set_text("🧪 Test Mode: ON", resize_if_needed=True)
+            if hasattr(self, "btn_sim") and not self.btn_sim.winfo_ismapped():
+                self.btn_sim.pack(side=tk.RIGHT, padx=4, before=self.btn_mode_toggle)
+            if hasattr(self, "btn_standby_sim"):
+                self.btn_standby_sim.pack()
         else:
             self.btn_mode_toggle.set_colors(
                 PALETTE["accent_green"], PALETTE["accent_green_hover"], PALETTE["accent_green_active"]
             )
             self.btn_mode_toggle.set_text("🖨️ Live Print: ON", resize_if_needed=True)
+            if hasattr(self, "btn_sim"):
+                self.btn_sim.pack_forget()
+            if hasattr(self, "btn_standby_sim"):
+                self.btn_standby_sim.pack_forget()
 
     # --- Grid Zoom Logic (Snaps between 3, 2, and 1 columns per row) ---
     def zoom_in(self):
@@ -835,13 +1018,14 @@ class PhotoBoothApp:
         )
         lbl_standby_sub.pack(pady=(0, 26))
 
-        btn_standby_sim = RoundedButton(
+        self.btn_standby_sim = RoundedButton(
             standby_inner, text="📸 Simulate 3 Camera Shots Now", command=self.simulate_batch,
             height=56, radius=16, pad_x=26, font_size=19,
             bg_hex=PALETTE["accent_purple"], hover_hex=PALETTE["accent_purple_hover"],
             active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["surface_bg"]
         )
-        btn_standby_sim.pack()
+        if self.dry_run.get():
+            self.btn_standby_sim.pack()
 
         # Scrollable gallery container
         self.gallery_canvas = tk.Canvas(
@@ -893,6 +1077,13 @@ class PhotoBoothApp:
             active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["lightbox_bar"]
         )
         self.btn_lb_frame.pack(side=tk.LEFT, padx=6)
+
+        self.btn_lb_next_frame = RoundedButton(
+            lb_top_inner, text="Next Template ▶", command=self._lightbox_next_frame,
+            height=40, radius=11, pad_x=14, font_size=13,
+            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["lightbox_bar"]
+        )
 
         # Close Lightbox Button (Right)
         self.btn_lb_close = RoundedButton(
@@ -1067,20 +1258,33 @@ class PhotoBoothApp:
         self.lbl_lb_copies.config(text=f"{card.copies} {unit}")
         self.btn_lb_print.set_text(f"🖨️ Print This ({card.copies}x)", resize_if_needed=True)
 
-        if self.frame_img is not None:
+        if self.frame_templates:
             self.btn_lb_frame.pack(side=tk.LEFT, padx=6)
             if card.use_frame:
                 self.btn_lb_frame.set_colors(
                     PALETTE["accent_purple"], PALETTE["accent_purple_hover"], PALETTE["accent_purple_active"]
                 )
                 self.btn_lb_frame.set_text("🖼️ Frame: ON", resize_if_needed=True)
+                if len(self.frame_templates) > 1:
+                    self.btn_lb_next_frame.pack(side=tk.LEFT, padx=4)
+                    t_idx = getattr(card, "frame_index", 0)
+                    if not (0 <= t_idx < len(self.frame_templates)):
+                        t_idx = 0
+                    raw_t = os.path.splitext(os.path.basename(self.frame_templates[t_idx]))[0]
+                    clean_t = raw_t[3:] if len(raw_t) > 3 and raw_t[:2].isdigit() and raw_t[2] in ('_', '-') else raw_t
+                    clean_t = clean_t.replace('_', ' ')
+                    self.btn_lb_next_frame.set_text(f"Template: {clean_t} ▶ ({t_idx + 1}/{len(self.frame_templates)})", resize_if_needed=True)
+                else:
+                    self.btn_lb_next_frame.pack_forget()
             else:
                 self.btn_lb_frame.set_colors(
                     PALETTE["accent_charcoal"], PALETTE["accent_charcoal_hover"], PALETTE["accent_charcoal_active"]
                 )
                 self.btn_lb_frame.set_text("🖼️ Frame: OFF", resize_if_needed=True)
+                self.btn_lb_next_frame.pack_forget()
         else:
             self.btn_lb_frame.pack_forget()
+            self.btn_lb_next_frame.pack_forget()
 
         z_pct = int(round(self.lightbox_zoom * 100))
         self.lbl_lb_zoom.config(text=f"🔍 Fit (100%)" if z_pct == 100 else f"🔍 {z_pct}%")
@@ -1088,6 +1292,12 @@ class PhotoBoothApp:
     def _lightbox_toggle_frame(self):
         if self.lightbox_card:
             self.lightbox_card.toggle_frame()
+            self._sync_lightbox_ui()
+            self._render_lightbox_image()
+
+    def _lightbox_next_frame(self):
+        if self.lightbox_card:
+            self.lightbox_card.next_template()
             self._sync_lightbox_ui()
             self._render_lightbox_image()
 
@@ -1105,8 +1315,10 @@ class PhotoBoothApp:
             img = img.rotate(-card.rotation, expand=True)
 
         # Show frame overlay in full-screen Lightbox if active for this photo
-        if card.use_frame and self.frame_img is not None:
-            img = printer_service.compose_with_frame(img, self.frame_img)
+        if card.use_frame:
+            frame_img = self._get_card_frame_image(card)
+            if frame_img is not None:
+                img = printer_service.compose_with_frame(img, frame_img)
 
         w, h = img.size
         base_scale = min((c_w - 40) / w, (c_h - 30) / h)
@@ -1371,6 +1583,9 @@ class PhotoBoothApp:
             self.root.bind(seq, lambda e: self.zoom_out())
         for seq in ("<Command-0>", "<Control-0>"):
             self.root.bind(seq, lambda e: self.zoom_reset())
+        # Quick circular frame template cycle with 'f'
+        self.root.bind("f", lambda e: self.next_frame_template())
+        self.root.bind("F", lambda e: self.next_frame_template())
 
     def update_printer_status(self):
         def check():
@@ -1385,52 +1600,324 @@ class PhotoBoothApp:
 
         threading.Thread(target=check, daemon=True).start()
 
-    def select_frame(self):
-        if self.frame_path:
-            ans = messagebox.askyesnocancel(
-                "Photo Frame",
-                f"Currently active frame:\n{os.path.basename(self.frame_path)}\n\n• Click 'Yes' to choose a new frame PNG\n• Click 'No' to remove/clear the frame\n• Click 'Cancel' to keep current"
-            )
-            if ans is False:  # Remove frame
-                self.frame_path = None
-                self.frame_img = None
-                self.btn_frame.set_text("🖼️ Frame: None", resize_if_needed=True)
-                self.lbl_status.config(text="🖼️ Frame removed. Photos will print without overlay.")
-                for card in self.active_cards:
-                    card._render_thumbnail()
-                if self.lightbox_card is not None:
-                    self._sync_lightbox_ui()
-                    self._render_lightbox_image()
-                return
-            elif ans is None:
+    def _init_frame_templates(self):
+        """Initializes multi-template system from saved config or default sample_frames."""
+        saved_folder = None
+        try:
+            cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+            if os.path.isfile(cfg_path):
+                import json
+                with open(cfg_path, "r") as f:
+                    saved_folder = json.load(f).get("frames_folder")
+        except Exception:
+            pass
+
+        if saved_folder:
+            resolved = saved_folder if os.path.isabs(saved_folder) else os.path.join(os.path.dirname(os.path.abspath(__file__)), saved_folder)
+            if os.path.isdir(resolved):
+                if self.load_frames_from_folder(resolved, silent=True):
+                    return
+
+        # Try default sample_frames directory in app folder
+        default_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_frames")
+        if os.path.isdir(default_dir):
+            if self.load_frames_from_folder(default_dir, silent=True):
                 return
 
-        path = filedialog.askopenfilename(
-            title="Select Photo Frame (transparent PNG)", filetypes=[("PNG image", "*.png")]
-        )
-        if not path:
-            return
+        # Fallback to single sample_frame.png if present
+        single_sample = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_frame.png")
+        if os.path.isfile(single_sample):
+            self.frame_templates = [single_sample]
+            self.frame_index = 0
+            self._apply_active_frame()
+
+    def _update_frame_ui(self):
+        total = len(self.frame_templates)
+        if total == 0:
+            self.btn_frame_prev.pack_forget()
+            self.btn_frame_next.pack_forget()
+            self.btn_frame_active.pack(side=tk.LEFT, padx=3, pady=2)
+            self.btn_frame_active.set_colors(
+                PALETTE["accent_charcoal"], PALETTE["accent_charcoal_hover"], PALETTE["accent_charcoal_active"]
+            )
+            self.btn_frame_active.set_text("🖼️ Frame: None", resize_if_needed=True)
+            self.frame_path = None
+            self.frame_img = None
+        else:
+            if total > 1:
+                self.btn_frame_prev.pack(side=tk.LEFT, padx=(2, 1), pady=2)
+                self.btn_frame_active.pack(side=tk.LEFT, padx=1, pady=2)
+                self.btn_frame_next.pack(side=tk.LEFT, padx=(1, 2), pady=2)
+            else:
+                self.btn_frame_prev.pack_forget()
+                self.btn_frame_next.pack_forget()
+                self.btn_frame_active.pack(side=tk.LEFT, padx=3, pady=2)
+
+            if not (0 <= self.frame_index < total):
+                self.frame_index = 0
+
+            self.frame_path = self.frame_templates[self.frame_index]
+            self.frame_img = self._get_frame_image_by_index(self.frame_index)
+
+            raw_name = os.path.splitext(os.path.basename(self.frame_path))[0]
+            clean_name = raw_name
+            if len(clean_name) > 3 and clean_name[:2].isdigit() and clean_name[2] in ("_", "-", " "):
+                clean_name = clean_name[3:]
+            clean_name = clean_name.replace("_", " ")
+
+            label_text = f"🖼️ {clean_name} ({self.frame_index + 1}/{total})" if total > 1 else f"🖼️ {clean_name}"
+            self.btn_frame_active.set_colors(
+                PALETTE["accent_purple"], PALETTE["accent_purple_hover"], PALETTE["accent_purple_active"]
+            )
+            self.btn_frame_active.set_text(label_text, resize_if_needed=True)
+
+    def _get_frame_image_by_index(self, idx):
+        if not self.frame_templates or not (0 <= idx < len(self.frame_templates)):
+            return None
+        path = self.frame_templates[idx]
+        if path in self._frame_cache:
+            return self._frame_cache[path]
         try:
             with Image.open(path) as f:
-                self.frame_img = f.convert("RGBA")
+                img = f.convert("RGBA")
+                self._frame_cache[path] = img
+                return img
         except Exception as e:
-            messagebox.showerror("Invalid Frame", f"Could not open frame:\n\n{e}")
+            print(f"[Warning] Failed to load frame template '{path}': {e}")
+            return None
+
+    def _get_card_frame_image(self, card=None):
+        if card is None:
+            idx = self.frame_index if (0 <= self.frame_index < len(self.frame_templates)) else 0
+            return self._get_frame_image_by_index(idx)
+        if not getattr(card, "use_frame", True):
+            return None
+        idx = getattr(card, "frame_index", 0)
+        return self._get_frame_image_by_index(idx)
+
+    def _on_card_frame_changed(self, card):
+        if self.lightbox_card == card:
+            self._sync_lightbox_ui()
+            self._render_lightbox_image()
+
+    def apply_active_frame_to_all_cards(self):
+        """Explicitly applies the currently active default frame template to all photos in the session."""
+        if not self.frame_templates:
             return
-        self.frame_path = path
-        name = os.path.basename(path)
-        if len(name) > 18:
-            name = name[:15] + "…"
-        self.btn_frame.set_text(f"🖼️ Frame: {name}", resize_if_needed=True)
-        w, h = self.frame_img.size
-        self.lbl_status.config(text=f"🖼️ Frame loaded: {os.path.basename(path)} ({w}×{h} px)")
         for card in self.active_cards:
+            card.frame_index = self.frame_index
+            card.use_frame = True
+            card._composed = None
+            card._thumb_cache.clear()
+            card._update_frame_visual()
+            card._render_thumbnail()
+        if self.lightbox_card is not None:
+            self._sync_lightbox_ui()
+            self._render_lightbox_image()
+        name = os.path.basename(self.frame_templates[self.frame_index]) if 0 <= self.frame_index < len(self.frame_templates) else ""
+        self.lbl_status.config(text=f"🖼️ Applied frame '{name}' to all photos in session.")
+
+    def _on_frame_button_clicked(self):
+        """Dropdown menu to directly select template, choose folder, or disable frames."""
+        if not self.frame_templates:
+            self.select_frames_folder()
+            return
+
+        menu = tk.Menu(
+            self.root, tearoff=0,
+            bg=PALETTE["surface_elevated"], fg="#ffffff",
+            activebackground=PALETTE["accent_purple"], activeforeground="#ffffff",
+            font=font_bold(13)
+        )
+        menu.add_command(label="── Choose Default Template ──", state=tk.DISABLED)
+        for idx, path in enumerate(self.frame_templates):
+            name = os.path.splitext(os.path.basename(path))[0].replace("_", " ")
+            marker = "✓  " if idx == self.frame_index else "    "
+            menu.add_command(
+                label=f"{marker}{idx + 1}. {name}",
+                command=lambda i=idx: self.set_frame_index(i)
+            )
+        menu.add_separator()
+        if self.active_cards:
+            menu.add_command(label="🔄 Apply Default Frame to All Current Photos", command=self.apply_active_frame_to_all_cards)
+        menu.add_command(label="📁 Choose Different Frames Folder...", command=self.select_frames_folder)
+        menu.add_command(label="📄 Select Specific Frame PNG(s)...", command=self.select_frame_files)
+        menu.add_command(label="🚫 Disable Frames (No Overlay)", command=self.clear_frame_templates)
+
+        x = self.btn_frame_active.winfo_rootx()
+        y = self.btn_frame_active.winfo_rooty() + self.btn_frame_active.winfo_height() + 4
+        menu.post(x, y)
+
+    def next_frame_template(self):
+        """Circular forward switch for default template: 1 -> 2 -> 3 -> 1."""
+        if not self.frame_templates:
+            self.select_frames_folder()
+            return
+        self.frame_index = (self.frame_index + 1) % len(self.frame_templates)
+        self._update_frame_ui()
+        if self.frame_path:
+            name = os.path.basename(self.frame_path)
+            self.lbl_status.config(
+                text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)}) — Click [◀/▶] or [f] to cycle."
+            )
+
+    def prev_frame_template(self):
+        """Circular backward switch for default template: 1 -> 3 -> 2 -> 1."""
+        if not self.frame_templates:
+            self.select_frames_folder()
+            return
+        self.frame_index = (self.frame_index - 1) % len(self.frame_templates)
+        self._update_frame_ui()
+        if self.frame_path:
+            name = os.path.basename(self.frame_path)
+            self.lbl_status.config(
+                text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)}) — Click [◀/▶] or [f] to cycle."
+            )
+
+    def set_frame_index(self, i):
+        """Direct index selection from dropdown menu."""
+        if 0 <= i < len(self.frame_templates):
+            self.frame_index = i
+            self._update_frame_ui()
+            if self.frame_path:
+                name = os.path.basename(self.frame_path)
+                self.lbl_status.config(
+                    text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)})."
+                )
+
+    def select_frames_folder(self):
+        initial = self.frames_folder or os.path.dirname(os.path.abspath(__file__))
+        folder = filedialog.askdirectory(initialdir=initial, title="Select Frames Folder (containing .PNG templates)")
+        if not folder:
+            return
+        self.load_frames_from_folder(folder)
+
+    def select_frame_files(self):
+        initial = self.frames_folder or os.path.dirname(os.path.abspath(__file__))
+        files = filedialog.askopenfilenames(
+            initialdir=initial,
+            title="Select Frame PNG(s)",
+            filetypes=[("PNG image", "*.png")]
+        )
+        if not files:
+            return
+        valid_files = [f for f in sorted(files) if not os.path.basename(f).startswith(".")]
+        if valid_files:
+            self._frame_cache.clear()
+            self.frame_templates = valid_files
+            self.frame_index = 0
+            self.frames_folder = os.path.dirname(valid_files[0])
+            self._update_frame_ui()
+            self._save_frames_config()
+            for card in self.active_cards:
+                card.frame_index = 0
+                card._composed = None
+                card._thumb_cache.clear()
+                card._update_frame_visual()
+                card._render_thumbnail()
+            if self.lightbox_card is not None:
+                self._sync_lightbox_ui()
+                self._render_lightbox_image()
+
+    def load_frames_from_folder(self, folder, silent=False):
+        if not os.path.isdir(folder):
+            return False
+        png_files = sorted([
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if not f.startswith(".") and f.lower().endswith(".png")
+        ])
+        if not png_files:
+            if not silent:
+                messagebox.showwarning(
+                    "No PNG Frames Found",
+                    f"No .png files were found in:\n{folder}\n\nPlease add transparent 100x148mm PNG frames to this folder."
+                )
+            return False
+        self._frame_cache.clear()
+        self.frame_templates = png_files
+        self.frame_index = 0
+        self.frames_folder = folder
+        self._update_frame_ui()
+        self._save_frames_config()
+        self.lbl_status.config(text=f"🖼️ Loaded {len(png_files)} frame template(s) from {os.path.basename(folder)}.")
+        for card in self.active_cards:
+            card.frame_index = 0
+            card._composed = None
+            card._thumb_cache.clear()
+            card._update_frame_visual()
+            card._render_thumbnail()
+        if self.lightbox_card is not None:
+            self._sync_lightbox_ui()
+            self._render_lightbox_image()
+        return True
+
+    def clear_frame_templates(self):
+        self._frame_cache.clear()
+        self.frame_templates = []
+        self.frame_index = -1
+        self.frame_path = None
+        self.frame_img = None
+        self.frames_folder = None
+        self._update_frame_ui()
+        self._save_frames_config()
+        self.lbl_status.config(text="🖼️ Frames disabled. Photos will print without overlay.")
+        for card in self.active_cards:
+            card._composed = None
+            card._thumb_cache.clear()
+            card._update_frame_visual()
             card._render_thumbnail()
         if self.lightbox_card is not None:
             self._sync_lightbox_ui()
             self._render_lightbox_image()
 
+    def _apply_active_frame(self):
+        self._update_frame_ui()
+        if self.frame_path:
+            name = os.path.basename(self.frame_path)
+            self.lbl_status.config(
+                text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)}) — Click [◀/▶] or [f] to cycle."
+            )
+        for card in self.active_cards:
+            card._composed = None
+            card._thumb_cache.clear()
+            card._render_thumbnail()
+        if self.lightbox_card is not None:
+            self._sync_lightbox_ui()
+            self._render_lightbox_image()
+
+    def _save_frames_config(self):
+        try:
+            app_dir = os.path.dirname(os.path.abspath(__file__))
+            cfg_path = os.path.join(app_dir, "config.json")
+            if os.path.isfile(cfg_path):
+                import json
+                with open(cfg_path, "r") as f:
+                    cfg = json.load(f)
+                save_val = self.frames_folder
+                if save_val:
+                    try:
+                        if os.path.commonpath([app_dir, save_val]) == app_dir:
+                            save_val = os.path.relpath(save_val, app_dir)
+                    except ValueError:
+                        pass
+                cfg["frames_folder"] = save_val
+                with open(cfg_path, "w") as f:
+                    json.dump(cfg, f, indent=2)
+        except Exception:
+            pass
+
+    def select_frame(self):
+        """Legacy entry point / alias."""
+        self._on_frame_button_clicked()
+
     def _frame_for(self, card):
-        return self.frame_path if card.use_frame else None
+        if not getattr(card, "use_frame", True) or not self.frame_templates:
+            return None
+        idx = getattr(card, "frame_index", 0)
+        if 0 <= idx < len(self.frame_templates):
+            return self.frame_templates[idx]
+        return self.frame_templates[0]
 
     def select_folder(self):
         folder = filedialog.askdirectory(initialdir=self.watch_folder, title="Select Sony Imaging Edge Save Folder")
@@ -1463,7 +1950,10 @@ class PhotoBoothApp:
             on_print_single=self._print_single_card,
             on_open_preview=self.open_lightbox,
             canvas_height=c_height,
-            get_frame=lambda: self.frame_img
+            get_frame=self._get_card_frame_image,
+            frame_index=self.frame_index if (0 <= self.frame_index < len(self.frame_templates)) else 0,
+            get_frame_templates=lambda: self.frame_templates,
+            on_frame_change=self._on_card_frame_changed
         )
         self.active_cards.append(card)
         self._rearrange_cards_grid(scroll_to_bottom=True)

@@ -13,6 +13,7 @@ from PIL import Image
 # On Windows, Canon SELPHY CP1500 typically installs with spaces in the device name
 PRINTER_NAME = "Canon SELPHY CP1500"
 POSTCARD_RATIO = 148.0 / 100.0  # 1.48 (Hagaki / 100x148 mm)
+MAX_PRINT_LONG_EDGE = 2960  # 500 DPI on 100x148 mm postcard (exceeds SELPHY 300 DPI hardware)
 
 
 def check_printer_status(printer_name=PRINTER_NAME):
@@ -127,10 +128,11 @@ def clear_print_queue(printer_name=PRINTER_NAME):
         return False, str(e)
 
 
-def compose_with_frame(photo, frame):
+def compose_with_frame(photo, frame, max_long_edge=MAX_PRINT_LONG_EDGE):
     """
-    Center-crops the photo (at native resolution) to the frame's aspect ratio,
-    then overlays the transparent PNG frame on top. The frame is resized to the photo, not vice versa.
+    Center-crops the photo to the frame's aspect ratio, caps resolution at 500 DPI
+    (max_long_edge=2960) so 33MP camera shots don't bottleneck CPU/spooler, and
+    overlays the transparent PNG frame on top.
     """
     fw, fh = frame.size
     pw, ph = photo.size
@@ -139,39 +141,69 @@ def compose_with_frame(photo, frame):
     else:
         cw, ch = pw, round(pw * fh / fw)
     left, top = (pw - cw) // 2, (ph - ch) // 2
-    canvas = photo.crop((left, top, left + cw, top + ch)).convert("RGBA")
-    overlay = frame.convert("RGBA").resize((cw, ch), Image.Resampling.LANCZOS)
+    canvas = photo.crop((left, top, left + cw, top + ch))
+    if max_long_edge and max(cw, ch) > max_long_edge:
+        scale = max_long_edge / max(cw, ch)
+        tw = max(1, round(cw * scale))
+        th = max(1, round(ch * scale))
+        canvas = canvas.resize((tw, th), Image.Resampling.LANCZOS, reducing_gap=2.0)
+    else:
+        tw, th = cw, ch
+    canvas = canvas.convert("RGBA")
+    overlay = frame.convert("RGBA")
+    if overlay.size != (tw, th):
+        overlay = overlay.resize((tw, th), Image.Resampling.LANCZOS)
     return Image.alpha_composite(canvas, overlay).convert("RGB")
 
 
 def prepare_lossless_rotated_image(image_path, output_dir=None, rotation=0, frame_path=None):
     """
-    If rotation or a frame is needed, prepares a 100% LOSSLESS temporary PNG print file.
-    Does NOT use lossy JPEG re-compression. Preserves exact pixel data.
+    Prepares a high-speed 500 DPI (2960x2000) 4:4:4 studio-grade print spool file
+    for rotation, frame overlay, or oversized camera originals.
     """
     with Image.open(image_path) as img:
+        try:
+            exif_orient = img.getexif().get(0x0112, 1)
+        except Exception:
+            exif_orient = 1
+
+        if exif_orient == 1 and max(img.size) > MAX_PRINT_LONG_EDGE:
+            try:
+                w0, h0 = img.size
+                s0 = MAX_PRINT_LONG_EDGE / max(w0, h0)
+                img.draft("RGB", (int(w0 * s0), int(h0 * s0)))
+            except Exception:
+                pass
+
         try:
             import PIL.ImageOps
             img = PIL.ImageOps.exif_transpose(img)
         except Exception:
             pass
 
-        if rotation != 0:
+        if rotation % 360 != 0:
             img = img.rotate(-rotation, expand=True)
 
         if frame_path:
             with Image.open(frame_path) as frame:
-                img = compose_with_frame(img, frame)
+                img = compose_with_frame(img, frame, max_long_edge=MAX_PRINT_LONG_EDGE)
+        elif max(img.size) > MAX_PRINT_LONG_EDGE:
+            w, h = img.size
+            scale = MAX_PRINT_LONG_EDGE / max(w, h)
+            img = img.resize(
+                (max(1, round(w * scale)), max(1, round(h * scale))),
+                Image.Resampling.LANCZOS, reducing_gap=2.0
+            )
 
         if output_dir is None:
             output_dir = os.path.dirname(image_path)
 
         base_name = os.path.basename(image_path)
         name, _ = os.path.splitext(base_name)
-        out_path = os.path.join(output_dir, f".spool_lossless_{name}.png")
+        out_path = os.path.join(output_dir, f".spool_print_{name}.jpg")
 
-        # Save as 100% LOSSLESS PNG with 300 DPI metadata
-        img.convert("RGB").save(out_path, "PNG", dpi=(300, 300))
+        # Save at 500 DPI resolution with 4:4:4 studio chroma (subsampling=0, quality=98)
+        img.convert("RGB").save(out_path, "JPEG", dpi=(300, 300), quality=98, subsampling=0)
         return out_path
 
 
@@ -250,7 +282,14 @@ def print_photo(image_path, copies=1, printer_name=PRINTER_NAME, dry_run=False, 
         return False, f"File not found: {image_path}"
 
     temp_file = None
-    if rotation % 360 != 0 or frame_path:
+    need_spool_prep = (rotation % 360 != 0) or bool(frame_path)
+    if not need_spool_prep:
+        try:
+            need_spool_prep = os.path.getsize(image_path) > 4 * 1024 * 1024
+        except OSError:
+            pass
+
+    if need_spool_prep:
         try:
             temp_file = prepare_lossless_rotated_image(image_path, rotation=rotation, frame_path=frame_path)
             target_print_file = temp_file

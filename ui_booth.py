@@ -482,12 +482,30 @@ class PhotoCard(tk.Frame):
         try:
             self.pil_img = Image.open(self.photo_path)
             try:
+                exif_orient = self.pil_img.getexif().get(0x0112, 1)
+            except Exception:
+                exif_orient = 1
+            if exif_orient == 1 and max(self.pil_img.size) > 2960:
+                try:
+                    w0, h0 = self.pil_img.size
+                    s0 = 2960.0 / max(w0, h0)
+                    self.pil_img.draft("RGB", (int(w0 * s0), int(h0 * s0)))
+                except Exception:
+                    pass
+            try:
                 import PIL.ImageOps
                 self.pil_img = PIL.ImageOps.exif_transpose(self.pil_img)
             except Exception:
                 pass
-            # Create a 1800px high-definition working master for super-fast, sharp grid zooming
             w, h = self.pil_img.size
+            if max(w, h) > 2960:
+                scale = 2960.0 / max(w, h)
+                self.pil_img = self.pil_img.resize(
+                    (max(1, int(w * scale)), max(1, int(h * scale))),
+                    Image.Resampling.LANCZOS, reducing_gap=2.0
+                )
+                w, h = self.pil_img.size
+            # Create a 1800px high-definition working master for super-fast, sharp grid zooming
             if max(w, h) > 1800:
                 scale = 1800.0 / max(w, h)
                 self.preview_master = self.pil_img.resize(
@@ -1318,7 +1336,11 @@ class PhotoBoothApp:
         if card.use_frame:
             frame_img = self._get_card_frame_image(card)
             if frame_img is not None:
-                img = printer_service.compose_with_frame(img, frame_img)
+                lb_key = (card.rotation % 360, id(frame_img))
+                cur_lb = getattr(card, "_lb_composed", None)
+                if cur_lb is None or cur_lb[0] != lb_key:
+                    card._lb_composed = (lb_key, printer_service.compose_with_frame(img, frame_img))
+                img = card._lb_composed[1]
 
         w, h = img.size
         base_scale = min((c_w - 40) / w, (c_h - 30) / h)
@@ -2063,8 +2085,15 @@ class PhotoBoothApp:
 
         def worker():
             results = []
-            for card in selected_cards:
+            total_cards = len(selected_cards)
+            for idx, card in enumerate(selected_cards, start=1):
                 fname = os.path.basename(card.photo_path)
+                self.root.after(
+                    0,
+                    lambda i=idx, fn=fname, c=card.copies: self.lbl_status.config(
+                        text=f"⏳ Spooling ({i}/{total_cards}): {fn} ({c}x) to Canon SELPHY..."
+                    )
+                )
                 success, msg = printer_service.print_photo(
                     card.photo_path, copies=card.copies, dry_run=dry, rotation=card.rotation,
                     frame_path=self._frame_for(card)

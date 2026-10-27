@@ -194,6 +194,8 @@ def prepare_lossless_rotated_image(image_path, output_dir=None, rotation=0, fram
                 (max(1, round(w * scale)), max(1, round(h * scale))),
                 Image.Resampling.LANCZOS, reducing_gap=2.0
             )
+        else:
+            img.load()
 
         if output_dir is None:
             output_dir = os.path.dirname(image_path)
@@ -282,22 +284,12 @@ def print_photo(image_path, copies=1, printer_name=PRINTER_NAME, dry_run=False, 
         return False, f"File not found: {image_path}"
 
     temp_file = None
-    need_spool_prep = (rotation % 360 != 0) or bool(frame_path)
-    if not need_spool_prep:
-        try:
-            need_spool_prep = os.path.getsize(image_path) > 4 * 1024 * 1024
-        except OSError:
-            pass
-
-    if need_spool_prep:
-        try:
-            temp_file = prepare_lossless_rotated_image(image_path, rotation=rotation, frame_path=frame_path)
-            target_print_file = temp_file
-        except Exception as e:
-            if frame_path:
-                return False, f"Could not apply frame: {e}"
-            target_print_file = image_path
-    else:
+    try:
+        temp_file = prepare_lossless_rotated_image(image_path, rotation=rotation, frame_path=frame_path)
+        target_print_file = temp_file
+    except Exception as e:
+        if frame_path:
+            return False, f"Could not apply frame: {e}"
         target_print_file = image_path
 
     fname = os.path.basename(image_path)

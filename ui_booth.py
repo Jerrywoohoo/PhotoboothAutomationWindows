@@ -21,7 +21,6 @@ from PIL import Image, ImageDraw, ImageTk, ImageFilter, ImageEnhance
 import printer_service
 from watcher import FolderWatcher
 import simulate_shots
-import ftp_service
 
 # --- Apple HIG & Refactoring UI Dark Studio Palette ---
 PALETTE = {
@@ -299,7 +298,7 @@ class PhotoCard(tk.Frame):
     """
     def __init__(self, parent, photo_path, shot_index, on_toggle_select, on_print_single, on_open_preview,
                  canvas_height=315, get_frame=None, frame_index=0, get_frame_templates=None,
-                 on_frame_change=None, **kwargs):
+                 on_frame_change=None, use_frame=True, **kwargs):
         super().__init__(
             parent, bg=PALETTE["card_selected_bg"], highlightthickness=3,
             highlightbackground=PALETTE["accent_blue"], bd=0, **kwargs
@@ -314,7 +313,7 @@ class PhotoCard(tk.Frame):
         self.frame_index = frame_index
         self.get_frame_templates = get_frame_templates or (lambda: [])
         self.on_frame_change = on_frame_change
-        self.use_frame = True
+        self.use_frame = use_frame
 
         self.selected = True
         self.copies = 1
@@ -763,17 +762,6 @@ class PhotoBoothApp:
         self.watch_folder = os.path.abspath(os.path.expanduser(watch_folder)) if watch_folder else os.path.expanduser("~/Pictures")
         self.dry_run = tk.BooleanVar(value=dry_run)
 
-        # Embedded Sony Camera FTP Receiver
-        self.ftp_port = 2121
-        self.ftp_ips = ftp_service.get_local_ips()
-        self.ftp_ip = self.ftp_ips[0] if self.ftp_ips else "127.0.0.1"
-        self.ftp_server = ftp_service.PhotoBoothFTPServer(
-            self.watch_folder, port=self.ftp_port,
-            on_new_photo_callback=self.on_new_photo_detected
-        )
-        self.ftp_server.start()
-        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
-
         self.active_cards = []
         self.processed_files = set()
 
@@ -820,67 +808,93 @@ class PhotoBoothApp:
     @staticmethod
     def _format_short_path(path_str):
         parts = [p for p in path_str.split(os.sep) if p]
-        if len(parts) <= 2:
+        if not parts:
             return path_str
-        return "…/" + "/".join(parts[-2:])
+        return parts[-1]
 
     def _build_top_bar(self):
         top_outer = tk.Frame(
             self.root, bg=PALETTE["surface_bg"],
             highlightthickness=1, highlightbackground=PALETTE["surface_border"]
         )
-        top_outer.pack(fill=tk.X, side=tk.TOP, padx=16, pady=(12, 6))
+        top_outer.pack(fill=tk.X, side=tk.TOP, padx=16, pady=(10, 4))
 
         top_bar = tk.Frame(top_outer, bg=PALETTE["surface_bg"])
-        top_bar.pack(fill=tk.X, padx=12, pady=10)
+        top_bar.pack(fill=tk.X, padx=10, pady=8)
 
-        # Left: Title + Folder Selector
-        lbl_title = tk.Label(
-            top_bar, text="📸 Photo Booth", font=font_bold(19),
-            fg=PALETTE["text_primary"], bg=PALETTE["surface_bg"]
+        # 1. Pack Right-Side Controls FIRST so Test/Live Print toggle is ALWAYS visible and never pushed off-screen
+        self.lbl_printer = tk.Label(
+            top_bar, text="● SELPHY: CHECKING", font=font_bold(12),
+            fg=PALETTE["accent_green"], bg=PALETTE["surface_elevated"],
+            padx=8, pady=7
         )
-        lbl_title.pack(side=tk.LEFT, padx=(4, 12))
+        self.lbl_printer.pack(side=tk.RIGHT, padx=(4, 2))
 
-        btn_folder = RoundedButton(
-            top_bar, text="📁 Folder", command=self.select_folder,
-            height=40, radius=11, pad_x=14, font_size=15,
+        btn_queue = RoundedButton(
+            top_bar, text="📋 Queue", command=self.open_queue_window,
+            height=36, radius=10, pad_x=11, font_size=13,
             bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
             active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_bg"]
         )
-        btn_folder.pack(side=tk.LEFT, padx=4)
+        btn_queue.pack(side=tk.RIGHT, padx=3)
 
-        self.lbl_folder = tk.Label(
-            top_bar, text=self._format_short_path(self.watch_folder), font=font_bold(12),
-            fg=PALETTE["text_secondary"], bg=PALETTE["surface_bg"]
+        self.btn_mode_toggle = RoundedButton(
+            top_bar, text="🧪 Test Mode: ON", command=self.toggle_dry_run,
+            height=36, radius=10, pad_x=12, font_size=14,
+            bg_hex=PALETTE["accent_amber"], hover_hex=PALETTE["accent_amber_hover"],
+            active_hex=PALETTE["accent_amber_active"], container_bg=PALETTE["surface_bg"]
         )
-        self.lbl_folder.pack(side=tk.LEFT, padx=(4, 10))
+        self.btn_mode_toggle.pack(side=tk.RIGHT, padx=3)
 
-        # Camera FTP Receiver Status & Info Pill
-        self.btn_ftp = RoundedButton(
-            top_bar, text=f"📡 FTP: {self.ftp_ip}:{self.ftp_port}", command=self.show_ftp_info,
-            height=38, radius=10, pad_x=12, font_size=13,
+        self.btn_sim = RoundedButton(
+            top_bar, text="📸 +3 Shots", command=self.simulate_batch,
+            height=36, radius=10, pad_x=11, font_size=13,
+            bg_hex=PALETTE["accent_purple"], hover_hex=PALETTE["accent_purple_hover"],
+            active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["surface_bg"]
+        )
+        if self.dry_run.get():
+            self.btn_sim.pack(side=tk.RIGHT, padx=3)
+
+        # 2. Left-Side Controls: Title + Folder + Frame Stepper + Grid Zoom
+        lbl_title = tk.Label(
+            top_bar, text="📸 Photo Booth", font=font_bold(16),
+            fg=PALETTE["text_primary"], bg=PALETTE["surface_bg"]
+        )
+        lbl_title.pack(side=tk.LEFT, padx=(2, 8))
+
+        self.btn_folder = RoundedButton(
+            top_bar, text=f"📁 {self._format_short_path(self.watch_folder)}", command=self.select_folder,
+            height=36, radius=10, pad_x=11, font_size=13,
+            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_bg"]
+        )
+        self.btn_folder.pack(side=tk.LEFT, padx=(2, 3))
+
+        self.btn_manual_add = RoundedButton(
+            top_bar, text="➕ Open", command=self.select_manual_photos,
+            height=36, radius=10, pad_x=10, font_size=13,
             bg_hex=PALETTE["accent_teal"], hover_hex=PALETTE["accent_teal_hover"],
             active_hex=PALETTE["accent_teal_active"], container_bg=PALETTE["surface_bg"]
         )
-        self.btn_ftp.pack(side=tk.LEFT, padx=(2, 10))
+        self.btn_manual_add.pack(side=tk.LEFT, padx=(0, 5))
 
         # Multi-Template Frame Stepper: [ ◀ ] [ 🖼️ Template (1/3) ] [ ▶ ]
         self.frame_box = tk.Frame(
             top_bar, bg=PALETTE["surface_elevated"],
             highlightthickness=1, highlightbackground=PALETTE["surface_border"]
         )
-        self.frame_box.pack(side=tk.LEFT, padx=(0, 10))
+        self.frame_box.pack(side=tk.LEFT, padx=4)
 
         self.btn_frame_prev = RoundedButton(
             self.frame_box, text="◀", command=self.prev_frame_template,
-            height=36, radius=9, pad_x=8, min_width=30, font_size=13,
+            height=34, radius=8, pad_x=7, min_width=28, font_size=12,
             bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
             active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_elevated"]
         )
 
         self.btn_frame_active = RoundedButton(
             self.frame_box, text="🖼️ Frame: None", command=self._on_frame_button_clicked,
-            height=36, radius=9, pad_x=12, font_size=13,
+            height=34, radius=8, pad_x=10, font_size=12,
             bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
             active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_elevated"]
         )
@@ -889,75 +903,42 @@ class PhotoBoothApp:
 
         self.btn_frame_next = RoundedButton(
             self.frame_box, text="▶", command=self.next_frame_template,
-            height=36, radius=9, pad_x=8, min_width=30, font_size=13,
+            height=34, radius=8, pad_x=7, min_width=28, font_size=12,
             bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
             active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_elevated"]
         )
 
-        # Center-Left: Grid Zoom Stepper ([ − ] 🔍 100% (3/row) [ + ])
+        # Grid Zoom Stepper ([ − ] 🔍 100% (3/row) [ + ])
         zoom_frame = tk.Frame(
             top_bar, bg=PALETTE["surface_elevated"],
             highlightthickness=1, highlightbackground=PALETTE["surface_border"]
         )
-        zoom_frame.pack(side=tk.LEFT, padx=6)
+        zoom_frame.pack(side=tk.LEFT, padx=4)
 
         self.btn_zoom_out = RoundedButton(
             zoom_frame, text="−", command=self.zoom_out,
-            height=36, radius=9, pad_x=11, min_width=36,
+            height=34, radius=8, pad_x=9, min_width=32,
             bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
-            active_hex=PALETTE["accent_charcoal_active"], font_size=19,
+            active_hex=PALETTE["accent_charcoal_active"], font_size=17,
             container_bg=PALETTE["surface_elevated"]
         )
         self.btn_zoom_out.pack(side=tk.LEFT, padx=2, pady=2)
 
         self.lbl_zoom = tk.Label(
-            zoom_frame, text="🔍 100% (3/row)", font=font_bold(13), width=14,
+            zoom_frame, text="🔍 100% (3/row)", font=font_bold(12), width=13,
             bg=PALETTE["surface_elevated"], fg="#ffffff", cursor="pointinghand"
         )
-        self.lbl_zoom.pack(side=tk.LEFT, padx=4)
+        self.lbl_zoom.pack(side=tk.LEFT, padx=2)
         self.lbl_zoom.bind("<Button-1>", lambda e: self.zoom_reset())
 
         self.btn_zoom_in = RoundedButton(
             zoom_frame, text="+", command=self.zoom_in,
-            height=36, radius=9, pad_x=11, min_width=36,
+            height=34, radius=8, pad_x=9, min_width=32,
             bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
-            active_hex=PALETTE["accent_charcoal_active"], font_size=19,
-            container_bg=PALETTE["surface_elevated"]
+            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_elevated"]
         )
         self.btn_zoom_in.pack(side=tk.LEFT, padx=2, pady=2)
 
-        # Right: Printer Status + Queue + Simulate + Tactile Mode Toggle
-        self.lbl_printer = tk.Label(
-            top_bar, text="● SELPHY: CHECKING", font=font_bold(13),
-            fg=PALETTE["accent_green"], bg=PALETTE["surface_elevated"],
-            padx=10, pady=8
-        )
-        self.lbl_printer.pack(side=tk.RIGHT, padx=(6, 2))
-
-        btn_queue = RoundedButton(
-            top_bar, text="📋 Print Queue", command=self.open_queue_window,
-            height=40, radius=11, pad_x=14, font_size=15,
-            bg_hex=PALETTE["accent_charcoal"], hover_hex=PALETTE["accent_charcoal_hover"],
-            active_hex=PALETTE["accent_charcoal_active"], container_bg=PALETTE["surface_bg"]
-        )
-        btn_queue.pack(side=tk.RIGHT, padx=4)
-
-        self.btn_sim = RoundedButton(
-            top_bar, text="📸 +3 Shots", command=self.simulate_batch,
-            height=40, radius=11, pad_x=14, font_size=15,
-            bg_hex=PALETTE["accent_purple"], hover_hex=PALETTE["accent_purple_hover"],
-            active_hex=PALETTE["accent_purple_active"], container_bg=PALETTE["surface_bg"]
-        )
-        if self.dry_run.get():
-            self.btn_sim.pack(side=tk.RIGHT, padx=4)
-
-        self.btn_mode_toggle = RoundedButton(
-            top_bar, text="🧪 Test Mode: ON", command=self.toggle_dry_run,
-            height=40, radius=11, pad_x=14, font_size=15,
-            bg_hex=PALETTE["accent_amber"], hover_hex=PALETTE["accent_amber_hover"],
-            active_hex=PALETTE["accent_amber_active"], container_bg=PALETTE["surface_bg"]
-        )
-        self.btn_mode_toggle.pack(side=tk.RIGHT, padx=4)
         self._sync_mode_toggle_visual()
 
     def toggle_dry_run(self):
@@ -977,7 +958,7 @@ class PhotoBoothApp:
             )
             self.btn_mode_toggle.set_text("🧪 Test Mode: ON", resize_if_needed=True)
             if hasattr(self, "btn_sim") and not self.btn_sim.winfo_ismapped():
-                self.btn_sim.pack(side=tk.RIGHT, padx=4, before=self.btn_mode_toggle)
+                self.btn_sim.pack(side=tk.RIGHT, padx=3, after=self.btn_mode_toggle)
             if hasattr(self, "btn_standby_sim"):
                 self.btn_standby_sim.pack()
         else:
@@ -1650,14 +1631,22 @@ class PhotoBoothApp:
     def _init_frame_templates(self):
         """Initializes multi-template system from saved config or default sample_frames."""
         saved_folder = None
+        has_saved_key = False
         try:
             cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
             if os.path.isfile(cfg_path):
                 import json
                 with open(cfg_path, "r") as f:
-                    saved_folder = json.load(f).get("frames_folder")
+                    cfg = json.load(f)
+                    if "frames_folder" in cfg:
+                        has_saved_key = True
+                        saved_folder = cfg.get("frames_folder")
         except Exception:
             pass
+
+        if has_saved_key and saved_folder is None:
+            self._update_frame_ui()
+            return
 
         if saved_folder:
             resolved = saved_folder if os.path.isabs(saved_folder) else os.path.join(os.path.dirname(os.path.abspath(__file__)), saved_folder)
@@ -1691,14 +1680,19 @@ class PhotoBoothApp:
             self.frame_path = None
             self.frame_img = None
         else:
-            if total > 1:
+            if total >= 1:
                 self.btn_frame_prev.pack(side=tk.LEFT, padx=(2, 1), pady=2)
                 self.btn_frame_active.pack(side=tk.LEFT, padx=1, pady=2)
                 self.btn_frame_next.pack(side=tk.LEFT, padx=(1, 2), pady=2)
-            else:
-                self.btn_frame_prev.pack_forget()
-                self.btn_frame_next.pack_forget()
-                self.btn_frame_active.pack(side=tk.LEFT, padx=3, pady=2)
+
+            if self.frame_index < 0:
+                self.frame_path = None
+                self.frame_img = None
+                self.btn_frame_active.set_colors(
+                    PALETTE["accent_charcoal"], PALETTE["accent_charcoal_hover"], PALETTE["accent_charcoal_active"]
+                )
+                self.btn_frame_active.set_text("🚫 No Frame", resize_if_needed=True)
+                return
 
             if not (0 <= self.frame_index < total):
                 self.frame_index = 0
@@ -1735,6 +1729,8 @@ class PhotoBoothApp:
 
     def _get_card_frame_image(self, card=None):
         if card is None:
+            if self.frame_index < 0:
+                return None
             idx = self.frame_index if (0 <= self.frame_index < len(self.frame_templates)) else 0
             return self._get_frame_image_by_index(idx)
         if not getattr(card, "use_frame", True):
@@ -1748,12 +1744,14 @@ class PhotoBoothApp:
             self._render_lightbox_image()
 
     def apply_active_frame_to_all_cards(self):
-        """Explicitly applies the currently active default frame template to all photos in the session."""
-        if not self.frame_templates:
-            return
+        """Explicitly applies the currently active default frame template (or No Frame) to all photos in the session."""
+        use_f = (0 <= self.frame_index < len(self.frame_templates))
         for card in self.active_cards:
-            card.frame_index = self.frame_index
-            card.use_frame = True
+            if use_f:
+                card.frame_index = self.frame_index
+                card.use_frame = True
+            else:
+                card.use_frame = False
             card._composed = None
             card._thumb_cache.clear()
             card._update_frame_visual()
@@ -1761,8 +1759,11 @@ class PhotoBoothApp:
         if self.lightbox_card is not None:
             self._sync_lightbox_ui()
             self._render_lightbox_image()
-        name = os.path.basename(self.frame_templates[self.frame_index]) if 0 <= self.frame_index < len(self.frame_templates) else ""
-        self.lbl_status.config(text=f"🖼️ Applied frame '{name}' to all photos in session.")
+        if use_f:
+            name = os.path.basename(self.frame_templates[self.frame_index])
+            self.lbl_status.config(text=f"🖼️ Applied frame '{name}' to all photos in session.")
+        else:
+            self.lbl_status.config(text="🚫 Removed frame overlay from all photos in session (No Frame).")
 
     def _on_frame_button_clicked(self):
         """Dropdown menu to directly select template, choose folder, or disable frames."""
@@ -1784,6 +1785,11 @@ class PhotoBoothApp:
                 label=f"{marker}{idx + 1}. {name}",
                 command=lambda i=idx: self.set_frame_index(i)
             )
+        no_frame_marker = "✓  " if self.frame_index < 0 else "    "
+        menu.add_command(
+            label=f"{no_frame_marker}🚫 No Frame (No Overlay)",
+            command=lambda: self.set_frame_index(-1)
+        )
         menu.add_separator()
         if self.active_cards:
             menu.add_command(label="🔄 Apply Default Frame to All Current Photos", command=self.apply_active_frame_to_all_cards)
@@ -1796,40 +1802,65 @@ class PhotoBoothApp:
         menu.post(x, y)
 
     def next_frame_template(self):
-        """Circular forward switch for default template: 1 -> 2 -> 3 -> 1."""
+        """Circular forward switch for default template (includes No Frame)."""
         if not self.frame_templates:
             self.select_frames_folder()
             return
-        self.frame_index = (self.frame_index + 1) % len(self.frame_templates)
-        self._update_frame_ui()
-        if self.frame_path:
-            name = os.path.basename(self.frame_path)
-            self.lbl_status.config(
-                text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)}) — Click [◀/▶] or [f] to cycle."
-            )
+        total = len(self.frame_templates)
+        if self.frame_index < 0:
+            self.frame_index = 0
+        elif self.frame_index + 1 < total:
+            self.frame_index += 1
+        else:
+            self.frame_index = -1
+        self.set_frame_index(self.frame_index)
 
     def prev_frame_template(self):
-        """Circular backward switch for default template: 1 -> 3 -> 2 -> 1."""
+        """Circular backward switch for default template (includes No Frame)."""
         if not self.frame_templates:
             self.select_frames_folder()
             return
-        self.frame_index = (self.frame_index - 1) % len(self.frame_templates)
-        self._update_frame_ui()
-        if self.frame_path:
-            name = os.path.basename(self.frame_path)
-            self.lbl_status.config(
-                text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)}) — Click [◀/▶] or [f] to cycle."
-            )
+        total = len(self.frame_templates)
+        if self.frame_index < 0:
+            self.frame_index = total - 1
+        elif self.frame_index > 0:
+            self.frame_index -= 1
+        else:
+            self.frame_index = -1
+        self.set_frame_index(self.frame_index)
 
     def set_frame_index(self, i):
-        """Direct index selection from dropdown menu."""
-        if 0 <= i < len(self.frame_templates):
+        """Direct index selection from dropdown menu (-1 = No Frame)."""
+        if i < 0:
+            self.frame_index = -1
+            self._update_frame_ui()
+            for card in self.active_cards:
+                card.use_frame = False
+                card._composed = None
+                card._thumb_cache.clear()
+                card._update_frame_visual()
+                card._render_thumbnail()
+            if self.lightbox_card is not None:
+                self._sync_lightbox_ui()
+                self._render_lightbox_image()
+            self.lbl_status.config(text="🚫 Default Frame: No Frame (No Overlay).")
+        elif 0 <= i < len(self.frame_templates):
             self.frame_index = i
             self._update_frame_ui()
+            for card in self.active_cards:
+                card.use_frame = True
+                card.frame_index = i
+                card._composed = None
+                card._thumb_cache.clear()
+                card._update_frame_visual()
+                card._render_thumbnail()
+            if self.lightbox_card is not None:
+                self._sync_lightbox_ui()
+                self._render_lightbox_image()
             if self.frame_path:
                 name = os.path.basename(self.frame_path)
                 self.lbl_status.config(
-                    text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)})."
+                    text=f"🖼️ Default Frame: {name} ({self.frame_index + 1}/{len(self.frame_templates)}) — Click [◀/▶] or [f] to cycle."
                 )
 
     def select_frames_folder(self):
@@ -1857,6 +1888,7 @@ class PhotoBoothApp:
             self._update_frame_ui()
             self._save_frames_config()
             for card in self.active_cards:
+                card.use_frame = True
                 card.frame_index = 0
                 card._composed = None
                 card._thumb_cache.clear()
@@ -1889,6 +1921,7 @@ class PhotoBoothApp:
         self._save_frames_config()
         self.lbl_status.config(text=f"🖼️ Loaded {len(png_files)} frame template(s) from {os.path.basename(folder)}.")
         for card in self.active_cards:
+            card.use_frame = True
             card.frame_index = 0
             card._composed = None
             card._thumb_cache.clear()
@@ -1910,6 +1943,7 @@ class PhotoBoothApp:
         self._save_frames_config()
         self.lbl_status.config(text="🖼️ Frames disabled. Photos will print without overlay.")
         for card in self.active_cards:
+            card.use_frame = False
             card._composed = None
             card._thumb_cache.clear()
             card._update_frame_visual()
@@ -1967,111 +2001,41 @@ class PhotoBoothApp:
         return self.frame_templates[0]
 
     def select_folder(self):
-        folder = filedialog.askdirectory(initialdir=self.watch_folder, title="Select Photo Save Folder")
+        folder = filedialog.askdirectory(initialdir=self.watch_folder, title="Select Sony Imaging Edge Save Folder")
         if folder:
             self.watch_folder = folder
-            self.lbl_folder.config(text=self._format_short_path(folder))
+            self.btn_folder.set_text(f"📁 {self._format_short_path(folder)}", resize_if_needed=True)
             self.watcher.update_folder(folder)
-            if getattr(self, "ftp_server", None):
-                self.ftp_server.update_folder(folder)
 
-    def show_ftp_info(self):
-        """Displays Sony Camera FTP connection settings and in-camera steps."""
-        win = tk.Toplevel(self.root)
-        win.title("📡 Sony Camera FTP Transfer Setup")
-        win.geometry("640x580")
-        win.minsize(580, 520)
-        win.configure(bg=PALETTE["window_bg"])
-        win.transient(self.root)
-        win.grab_set()
-
-        # Center on parent
-        x = self.root.winfo_x() + (self.root.winfo_width() - 640) // 2
-        y = self.root.winfo_y() + (self.root.winfo_height() - 580) // 2
-        win.geometry(f"+{max(0, x)}+{max(0, y)}")
-
-        container = tk.Frame(win, bg=PALETTE["window_bg"], padx=24, pady=20)
-        container.pack(fill=tk.BOTH, expand=True)
-
-        header = tk.Label(
-            container, text="📡 Sony A7 IV Direct FTP Transfer",
-            font=font_bold(18), fg="#ffffff", bg=PALETTE["window_bg"]
+    def select_manual_photos(self):
+        initial = self.watch_folder if os.path.isdir(self.watch_folder) else os.path.expanduser("~/Pictures")
+        files = filedialog.askopenfilenames(
+            initialdir=initial,
+            title="Select Photo(s) to Load & Print",
+            filetypes=[
+                ("Photo Files", "*.jpg *.jpeg *.JPG *.JPEG *.png *.PNG *.heic *.HEIC"),
+                ("All Files", "*.*")
+            ]
         )
-        header.pack(anchor="w", pady=(0, 4))
-
-        sub = tk.Label(
-            container,
-            text="The camera sends photos directly to this computer over Wi-Fi or USB-C cable. Zero Sony desktop software required!",
-            font=font_bold(12), fg=PALETTE["text_secondary"], bg=PALETTE["window_bg"], wraplength=590, justify="left"
-        )
-        sub.pack(anchor="w", pady=(0, 14))
-
-        # Credentials Box
-        box = tk.Frame(
-            container, bg=PALETTE["surface_bg"],
-            highlightthickness=1, highlightbackground=PALETTE["surface_border"], padx=18, pady=12
-        )
-        box.pack(fill=tk.X, pady=(0, 14))
-
-        ips_str = ", ".join(self.ftp_ips) if self.ftp_ips else self.ftp_ip
-        fields = [
-            ("FTP Server IP / Host:", self.ftp_ip if len(self.ftp_ips) <= 1 else f"{self.ftp_ip}  (all: {ips_str})"),
-            ("Port Number:", str(self.ftp_port)),
-            ("User Name:", "sony   (or booth)"),
-            ("Password:", "sony   (or booth)"),
-            ("Directory:", "/   (leave root / blank)"),
-            ("Passive Mode (PASV):", "ON"),
-            ("Save Destination:", self._format_short_path(self.watch_folder)),
-        ]
-
-        for label, val in fields:
-            row = tk.Frame(box, bg=PALETTE["surface_bg"])
-            row.pack(fill=tk.X, pady=2)
-            tk.Label(
-                row, text=label, font=font_bold(13), fg=PALETTE["text_secondary"],
-                bg=PALETTE["surface_bg"], width=20, anchor="w"
-            ).pack(side=tk.LEFT)
-            tk.Label(
-                row, text=val, font=font_bold(13), fg="#ffffff" if "IP" not in label else PALETTE["accent_teal_hover"],
-                bg=PALETTE["surface_bg"], anchor="w"
-            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        # In-Camera Steps
-        guide_box = tk.Frame(container, bg=PALETTE["surface_elevated"], padx=16, pady=12)
-        guide_box.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
-
-        tk.Label(
-            guide_box, text="📸 5-Step In-Camera Setup on Sony A7 IV:",
-            font=font_bold(14), fg="#ffffff", bg=PALETTE["surface_elevated"]
-        ).pack(anchor="w", pady=(0, 6))
-
-        steps = [
-            "1. Connect: Connect A7 IV to same Wi-Fi / Hotspot (or plug USB-C cable).",
-            "2. Menu: MENU → Network (🌐) → Transfer/Remote → FTP Transfer Func.",
-            "3. Enable: Set 'FTP Function' → ON.",
-            "4. Server 1: Set Host IP, Port 2121, User sony, Pass sony, Passive ON.",
-            "5. Auto Transfer: Set 'Auto FTP Transfer' → ON. (Tip: Set Size to 2M or Std for instant transfer!)"
-        ]
-        for s in steps:
-            tk.Label(
-                guide_box, text=s, font=font_bold(12), fg=PALETTE["text_secondary"],
-                bg=PALETTE["surface_elevated"], anchor="w", justify="left"
-            ).pack(anchor="w", pady=2)
-
-        btn_close = RoundedButton(
-            container, text="Got It", command=win.destroy,
-            height=38, radius=10, pad_x=24, font_size=14,
-            bg_hex=PALETTE["accent_teal"], hover_hex=PALETTE["accent_teal_hover"],
-            active_hex=PALETTE["accent_teal_active"], container_bg=PALETTE["window_bg"]
-        )
-        btn_close.pack(anchor="e")
-
-    def _on_window_close(self):
-        if getattr(self, "ftp_server", None):
-            self.ftp_server.stop()
-        if getattr(self, "watcher", None):
-            self.watcher.stop()
-        self.root.destroy()
+        if not files:
+            return
+        added_count = 0
+        for f in files:
+            abs_f = os.path.abspath(f)
+            self.processed_files.discard(abs_f)
+            self.processed_files.discard(f)
+            existing_card = next((c for c in self.active_cards if os.path.abspath(c.photo_path) == abs_f), None)
+            if existing_card:
+                if not existing_card.selected:
+                    existing_card.toggle_selection()
+                added_count += 1
+            else:
+                self._add_photo_to_active_batch(abs_f)
+                added_count += 1
+        if added_count > 0:
+            self.lbl_status.config(
+                text=f"📂 Manually loaded {added_count} photo(s) into current session."
+            )
 
     def on_new_photo_detected(self, photo_path):
         if photo_path in self.processed_files:
@@ -2100,7 +2064,8 @@ class PhotoBoothApp:
             get_frame=self._get_card_frame_image,
             frame_index=self.frame_index if (0 <= self.frame_index < len(self.frame_templates)) else 0,
             get_frame_templates=lambda: self.frame_templates,
-            on_frame_change=self._on_card_frame_changed
+            on_frame_change=self._on_card_frame_changed,
+            use_frame=(0 <= self.frame_index < len(self.frame_templates))
         )
         self.active_cards.append(card)
         self._rearrange_cards_grid(scroll_to_bottom=True)

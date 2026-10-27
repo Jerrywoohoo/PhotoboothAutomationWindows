@@ -21,6 +21,7 @@ from PIL import Image, ImageDraw, ImageTk, ImageFilter, ImageEnhance
 import printer_service
 from watcher import FolderWatcher
 import simulate_shots
+import ftp_service
 
 # --- Apple HIG & Refactoring UI Dark Studio Palette ---
 PALETTE = {
@@ -63,6 +64,10 @@ PALETTE = {
     "accent_red": "#ef4444",
     "accent_red_hover": "#f87171",
     "accent_red_active": "#dc2626",
+    # Modern Teal (for FTP & Connectivity)
+    "accent_teal": "#0d9488",
+    "accent_teal_hover": "#14b8a6",
+    "accent_teal_active": "#0f766e",
 }
 
 # "Segoe UI" on Windows provides crisp, modern native typography.
@@ -758,6 +763,17 @@ class PhotoBoothApp:
         self.watch_folder = os.path.abspath(os.path.expanduser(watch_folder)) if watch_folder else os.path.expanduser("~/Pictures")
         self.dry_run = tk.BooleanVar(value=dry_run)
 
+        # Embedded Sony Camera FTP Receiver
+        self.ftp_port = 2121
+        self.ftp_ips = ftp_service.get_local_ips()
+        self.ftp_ip = self.ftp_ips[0] if self.ftp_ips else "127.0.0.1"
+        self.ftp_server = ftp_service.PhotoBoothFTPServer(
+            self.watch_folder, port=self.ftp_port,
+            on_new_photo_callback=self.on_new_photo_detected
+        )
+        self.ftp_server.start()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
+
         self.active_cards = []
         self.processed_files = set()
 
@@ -837,7 +853,16 @@ class PhotoBoothApp:
             top_bar, text=self._format_short_path(self.watch_folder), font=font_bold(12),
             fg=PALETTE["text_secondary"], bg=PALETTE["surface_bg"]
         )
-        self.lbl_folder.pack(side=tk.LEFT, padx=(4, 12))
+        self.lbl_folder.pack(side=tk.LEFT, padx=(4, 10))
+
+        # Camera FTP Receiver Status & Info Pill
+        self.btn_ftp = RoundedButton(
+            top_bar, text=f"📡 FTP: {self.ftp_ip}:{self.ftp_port}", command=self.show_ftp_info,
+            height=38, radius=10, pad_x=12, font_size=13,
+            bg_hex=PALETTE["accent_teal"], hover_hex=PALETTE["accent_teal_hover"],
+            active_hex=PALETTE["accent_teal_active"], container_bg=PALETTE["surface_bg"]
+        )
+        self.btn_ftp.pack(side=tk.LEFT, padx=(2, 10))
 
         # Multi-Template Frame Stepper: [ ◀ ] [ 🖼️ Template (1/3) ] [ ▶ ]
         self.frame_box = tk.Frame(
@@ -1942,11 +1967,111 @@ class PhotoBoothApp:
         return self.frame_templates[0]
 
     def select_folder(self):
-        folder = filedialog.askdirectory(initialdir=self.watch_folder, title="Select Sony Imaging Edge Save Folder")
+        folder = filedialog.askdirectory(initialdir=self.watch_folder, title="Select Photo Save Folder")
         if folder:
             self.watch_folder = folder
             self.lbl_folder.config(text=self._format_short_path(folder))
             self.watcher.update_folder(folder)
+            if getattr(self, "ftp_server", None):
+                self.ftp_server.update_folder(folder)
+
+    def show_ftp_info(self):
+        """Displays Sony Camera FTP connection settings and in-camera steps."""
+        win = tk.Toplevel(self.root)
+        win.title("📡 Sony Camera FTP Transfer Setup")
+        win.geometry("640x580")
+        win.minsize(580, 520)
+        win.configure(bg=PALETTE["window_bg"])
+        win.transient(self.root)
+        win.grab_set()
+
+        # Center on parent
+        x = self.root.winfo_x() + (self.root.winfo_width() - 640) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - 580) // 2
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+
+        container = tk.Frame(win, bg=PALETTE["window_bg"], padx=24, pady=20)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        header = tk.Label(
+            container, text="📡 Sony A7 IV Direct FTP Transfer",
+            font=font_bold(18), fg="#ffffff", bg=PALETTE["window_bg"]
+        )
+        header.pack(anchor="w", pady=(0, 4))
+
+        sub = tk.Label(
+            container,
+            text="The camera sends photos directly to this computer over Wi-Fi or USB-C cable. Zero Sony desktop software required!",
+            font=font_bold(12), fg=PALETTE["text_secondary"], bg=PALETTE["window_bg"], wraplength=590, justify="left"
+        )
+        sub.pack(anchor="w", pady=(0, 14))
+
+        # Credentials Box
+        box = tk.Frame(
+            container, bg=PALETTE["surface_bg"],
+            highlightthickness=1, highlightbackground=PALETTE["surface_border"], padx=18, pady=12
+        )
+        box.pack(fill=tk.X, pady=(0, 14))
+
+        ips_str = ", ".join(self.ftp_ips) if self.ftp_ips else self.ftp_ip
+        fields = [
+            ("FTP Server IP / Host:", self.ftp_ip if len(self.ftp_ips) <= 1 else f"{self.ftp_ip}  (all: {ips_str})"),
+            ("Port Number:", str(self.ftp_port)),
+            ("User Name:", "sony   (or booth)"),
+            ("Password:", "sony   (or booth)"),
+            ("Directory:", "/   (leave root / blank)"),
+            ("Passive Mode (PASV):", "ON"),
+            ("Save Destination:", self._format_short_path(self.watch_folder)),
+        ]
+
+        for label, val in fields:
+            row = tk.Frame(box, bg=PALETTE["surface_bg"])
+            row.pack(fill=tk.X, pady=2)
+            tk.Label(
+                row, text=label, font=font_bold(13), fg=PALETTE["text_secondary"],
+                bg=PALETTE["surface_bg"], width=20, anchor="w"
+            ).pack(side=tk.LEFT)
+            tk.Label(
+                row, text=val, font=font_bold(13), fg="#ffffff" if "IP" not in label else PALETTE["accent_teal_hover"],
+                bg=PALETTE["surface_bg"], anchor="w"
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # In-Camera Steps
+        guide_box = tk.Frame(container, bg=PALETTE["surface_elevated"], padx=16, pady=12)
+        guide_box.pack(fill=tk.BOTH, expand=True, pady=(0, 14))
+
+        tk.Label(
+            guide_box, text="📸 5-Step In-Camera Setup on Sony A7 IV:",
+            font=font_bold(14), fg="#ffffff", bg=PALETTE["surface_elevated"]
+        ).pack(anchor="w", pady=(0, 6))
+
+        steps = [
+            "1. Connect: Connect A7 IV to same Wi-Fi / Hotspot (or plug USB-C cable).",
+            "2. Menu: MENU → Network (🌐) → Transfer/Remote → FTP Transfer Func.",
+            "3. Enable: Set 'FTP Function' → ON.",
+            "4. Server 1: Set Host IP, Port 2121, User sony, Pass sony, Passive ON.",
+            "5. Auto Transfer: Set 'Auto FTP Transfer' → ON. (Tip: Set Size to 2M or Std for instant transfer!)"
+        ]
+        for s in steps:
+            tk.Label(
+                guide_box, text=s, font=font_bold(12), fg=PALETTE["text_secondary"],
+                bg=PALETTE["surface_elevated"], anchor="w", justify="left"
+            ).pack(anchor="w", pady=2)
+
+        btn_close = RoundedButton(
+            container, text="Got It", command=win.destroy,
+            height=38, radius=10, pad_x=24, font_size=14,
+            bg_hex=PALETTE["accent_teal"], hover_hex=PALETTE["accent_teal_hover"],
+            active_hex=PALETTE["accent_teal_active"], container_bg=PALETTE["window_bg"]
+        )
+        btn_close.pack(anchor="e")
+
+    def _on_window_close(self):
+        if getattr(self, "ftp_server", None):
+            self.ftp_server.stop()
+        if getattr(self, "watcher", None):
+            self.watcher.stop()
+        self.root.destroy()
 
     def on_new_photo_detected(self, photo_path):
         if photo_path in self.processed_files:
@@ -1980,6 +2105,10 @@ class PhotoBoothApp:
         self.active_cards.append(card)
         self._rearrange_cards_grid(scroll_to_bottom=True)
         self._update_summary()
+        try:
+            self.root.lift()
+        except Exception:
+            pass
 
     def _rearrange_cards_grid(self, scroll_to_bottom=False):
         """Lays out cards according to the active zoom column count (snaps between 3, 2, or 1 per row)."""

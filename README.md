@@ -19,9 +19,11 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 Unblock-File -Path .\run.ps1, .\run.bat
 ```
 
-### 3. Install Dependency (`Pillow`)
+### 3. Install Dependencies (`Pillow` & `pyftpdlib`)
 ```cmd
-pip install Pillow
+pip install -r requirements.txt
+:: or directly:
+pip install Pillow pyftpdlib
 ```
 
 ### 4. Run the App

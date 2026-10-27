@@ -29,11 +29,11 @@ class FolderWatcher:
             return set()
         found = set()
         try:
-            for entry in os.scandir(self.folder_path):
-                if entry.is_file():
-                    _, ext = os.path.splitext(entry.name)
-                    if ext.lower() in SUPPORTED_EXTENSIONS and not entry.name.startswith("."):
-                        found.add(entry.path)
+            for root, _, files in os.walk(self.folder_path):
+                for fname in files:
+                    _, ext = os.path.splitext(fname)
+                    if ext.lower() in SUPPORTED_EXTENSIONS and not fname.startswith("."):
+                        found.add(os.path.join(root, fname))
         except Exception:
             pass
         return found

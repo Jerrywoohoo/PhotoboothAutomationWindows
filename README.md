@@ -6,37 +6,20 @@ Automated, lossless, borderless photo printing workflow with multi-template `.pn
 
 ## 🚀 How to Use on Windows (Quick Start)
 
-### 1. Clone the Repository & Enter the Folder
-```cmd
-git clone https://github.com/Jerrywoohoo/PhotoboothAutomationWindows.git
-cd PhotoboothAutomationWindows
-```
+### Option 1: 🌟 One-Click Launcher (Easiest - Zero Setup!)
+1. Download or clone this folder.
+2. **Double-click `run.bat`** in File Explorer!
+   - On the very first launch, it automatically sets up an isolated environment and installs `Pillow`.
+   - On future launches, it boots immediately in 1 second.
+   *(Note: If Windows SmartScreen prompts "Windows protected your PC", click **More info** → **Run anyway**).*
 
-### 2. Grant Script Execution Permissions (If Needed on Windows)
-If Windows SmartScreen or PowerShell execution policy blocks running scripts from a newly cloned repository, run this once in **PowerShell** inside the folder:
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-Unblock-File -Path .\run.ps1, .\run.bat
-```
+---
 
-### 3. Install Dependency (`Pillow`)
-```cmd
-pip install Pillow
-```
-
-### 4. Run the App
-
-#### Option A: One-Click Launcher (`run.bat` or `run.ps1`)
-Double-click **`run.bat`** in File Explorer, or run from Command Prompt / PowerShell:
+### Option 2: Run via Command Prompt / PowerShell
 ```cmd
 .\run.bat
-```
-
-#### Option B: Run Directly with Python (Custom Camera Folder)
-```cmd
+:: Or run directly with Python:
 python photobooth.py
-:: Or specify a custom Sony Imaging Edge folder:
-python photobooth.py --folder "C:\Users\<YourUsername>\Pictures"
 ```
 - Monitors your Sony Imaging Edge save folder (defaults to your Windows `Pictures` folder).
 - Incoming camera photos appear side-by-side automatically.
